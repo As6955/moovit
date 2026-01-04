@@ -1,0 +1,314 @@
+
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>תחב"צ מלא</title>
+    <style>
+        :root { --primary: #0056b3; --active: #e2e6ea; --text: #222; }
+        body { margin: 0; font-family: sans-serif; background: #f4f4f4; display: flex; flex-direction: column; height: 100vh; overflow: hidden; color: var(--text); }
+        
+        #search-area { padding: 6px; background: #fff; border-bottom: 1px solid #ccc; }
+        input { width: 100%; padding: 8px; font-size: 16px; border: 1px solid #999; border-radius: 4px; box-sizing: border-box; }
+        input:focus { border-color: var(--primary); outline: none; background: #fff; }
+        
+        #list-area { flex: 1; overflow-y: auto; background: white; }
+        
+        .item { padding: 8px; border-bottom: 1px solid #eee; display: flex; align-items: center; cursor: pointer; height: 40px; }
+        .item.selected { background: var(--active); border-right: 4px solid var(--primary); }
+        
+        .badge { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; margin-left: 8px; background: #eee; flex-shrink: 0; font-size: 13px; }
+        .badge.bus { background: #dbeafe; color: #1e40af; }
+        .badge.stop { background: #fee2e2; color: #991b1b; }
+        
+        .info { flex: 1; overflow: hidden; white-space: nowrap; }
+        .title { font-weight: bold; font-size: 15px; display: inline-block; }
+        .sub { font-size: 12px; color: #666; margin-right: 5px; display: inline-block; }
+        
+        #modal { position: fixed; bottom: 0; left: 0; right: 0; background: white; border-top: 2px solid #ccc; max-height: 60%; display: flex; flex-direction: column; z-index: 100; transform: translateY(100%); transition: transform 0.1s; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); }
+        #modal.show { transform: translateY(0); }
+        .modal-head { padding: 8px; text-align: center; font-weight: bold; background: #f0f0f0; border-bottom: 1px solid #ddd; font-size: 14px; }
+        .modal-body { overflow-y: auto; }
+        
+        .loading { padding: 20px; text-align: center; color: #666; font-size: 14px; margin-top: 50px; }
+    </style>
+</head>
+<body>
+
+<div id="search-area">
+    <input type="text" id="search" placeholder="חפש קו או תחנה...">
+</div>
+
+<div id="list-area">
+    <div class="loading">טוען נתונים...</div>
+</div>
+
+<div id="modal">
+    <div class="modal-head" id="m-title"></div>
+    <div class="modal-body" id="m-list"></div>
+</div>
+
+<script src="transport_data.js"></script>
+
+<script>
+    if (typeof db === 'undefined') {
+        document.querySelector('.loading').innerText = 'שגיאה: קובץ הנתונים חסר.';
+    } else {
+        document.querySelector('.loading').style.display = 'none';
+        setTimeout(init, 50);
+    }
+
+    let view = 'home'; 
+    let sel = -1;
+    let listData = [];
+    let modalData = [];
+    let stack = [];
+
+    const elInput = document.getElementById('search');
+    const elList = document.getElementById('list-area');
+    const elModal = document.getElementById('modal');
+    const elMList = document.getElementById('m-list');
+    const elMTitle = document.getElementById('m-title');
+
+    elInput.addEventListener('input', () => renderHome(elInput.value));
+    document.addEventListener('keydown', handleKey);
+
+    function init() {
+        renderHome('');
+        elInput.focus();
+    }
+
+    function handleKey(e) {
+        const k = e.key;
+        const inInput = (document.activeElement === elInput);
+        
+        if (k === 'ArrowDown') {
+            e.preventDefault();
+            if (inInput) focusList();
+            else moveSel(1);
+        }
+        else if (k === 'ArrowUp') {
+            e.preventDefault();
+            if (!inInput) moveSel(-1);
+        }
+        else if (k === 'Enter') {
+            e.preventDefault();
+            if (inInput) focusList(); 
+            else triggerSelect();
+        }
+        else if (k === 'Backspace' || k === 'Escape') {
+            if (!inInput) { 
+                e.preventDefault(); 
+                goBack(); 
+            }
+        }
+        // אם לוחצים על מקש שאינו ניווט ואנחנו ברשימה -> פוקוס לחיפוש
+        else if (!inInput && k.length === 1) {
+             elInput.focus();
+             // התו ייכתב בתיבה
+        }
+    }
+
+    function moveSel(dir) {
+        const len = (view === 'modal') ? modalData.length : listData.length;
+        if (len === 0) return;
+        
+        let next = sel + dir;
+        
+        if (view === 'home' && next < 0) { 
+            sel = -1; 
+            elInput.focus(); 
+            renderSelection(); 
+            return; 
+        }
+        
+        if (next < 0) next = 0;
+        if (next >= len) next = len - 1;
+        sel = next; renderSelection(); scrollToItem();
+    }
+
+    function focusList() {
+        const len = (view === 'modal') ? modalData.length : listData.length;
+        if (len > 0) { elInput.blur(); sel = 0; renderSelection(); scrollToItem(); }
+    }
+
+    function renderSelection() {
+        document.querySelectorAll('.item.selected').forEach(e => e.classList.remove('selected'));
+        if (sel >= 0) {
+            const prefix = (view === 'modal') ? 'm-item-' : 'item-';
+            const el = document.getElementById(prefix + sel);
+            if (el) el.classList.add('selected');
+        }
+    }
+
+    function scrollToItem() {
+        if (sel >= 0) {
+            const prefix = (view === 'modal') ? 'm-item-' : 'item-';
+            const el = document.getElementById(prefix + sel);
+            if (el) el.scrollIntoView({block: 'nearest'});
+        }
+    }
+
+    function triggerSelect() {
+        if (sel < 0) return;
+        if (view === 'modal') {
+            const item = modalData[sel];
+            showStops(item.r, item.v);
+        } else {
+            const item = listData[sel];
+            if (item.type === 'route') openRoute(item.data);
+            else if (item.type === 'stop') openStop(item.data, item.id);
+            else if (item.type === 'stop_in_route') openStop(item.data, item.id);
+        }
+    }
+
+    function calcScore(txt, code, search) {
+        if (!search) return 1;
+        const sTxt = (txt || "").toString().toLowerCase();
+        const sCode = (code || "").toString().toLowerCase();
+        const sSch = search.toLowerCase();
+        
+        if (sCode === sSch) return 1000;
+        if (sCode.startsWith(sSch)) return 100;
+        if (sTxt.includes(sSch)) return 10;
+        return 0;
+    }
+
+    function renderHome(query) {
+        view = 'home'; sel = -1;
+        elModal.classList.remove('show');
+        elList.innerHTML = '';
+        listData = [];
+        if (typeof db === 'undefined') return;
+        
+        const q = query.trim();
+        const results = [];
+        
+        // כאן התיקון: הסרת ה-break כדי למצוא הכל
+        for (let i = 0; i < db.routes.length; i++) {
+            let r = db.routes[i];
+            let sc = Math.max(calcScore(r.a, r.n, q), calcScore(r.n, r.a, q));
+            if (sc > 0) results.push({ type: 'route', data: r, score: sc });
+        }
+
+        if (q.length > 0) {
+             let keys = Object.keys(db.stops);
+             for(let i=0; i<keys.length; i++) {
+                 let sid = keys[i];
+                 let s = db.stops[sid];
+                 let sc = calcScore(s.n, s.c, q);
+                 if (sc > 0) results.push({ type: 'stop', data: s, id: sid, score: sc });
+                 // כאן עדיין אפשר להשאיר גבול מסוים לתחנות כדי לא לקרוס, אבל גבוה
+                 if (results.length > 1000) break;
+             }
+        }
+
+        results.sort((a, b) => b.score - a.score || (a.type==='route'?-1:1));
+
+        // הצגת 100 התוצאות הראשונות בלבד כדי לא להכביד על התצוגה
+        const renderLimit = Math.min(results.length, 100);
+        for(let i=0; i<renderLimit; i++) {
+            const res = results[i];
+            listData.push(res);
+            const isBus = res.type === 'route';
+            const el = document.createElement('div');
+            el.className = 'item';
+            el.id = 'item-' + i;
+            el.onclick = () => { sel = i; renderSelection(); triggerSelect(); };
+            const title = isBus ? 'קו ' + res.data.n : res.data.n;
+            const sub = isBus ? res.data.a : 'מק"ט: ' + res.data.c;
+            el.innerHTML = `<div class="badge ${isBus?'bus':'stop'}">${isBus?res.data.n:'🚏'}</div>
+                            <div class="info"><div class="title">${title}</div>
+                            <span class="sub">${sub}</span></div>`;
+            elList.appendChild(el);
+        }
+        
+        if (listData.length === 0) elList.innerHTML = '<div style="padding:20px;text-align:center;color:#888">אין תוצאות</div>';
+    }
+
+    function openRoute(r) {
+        if (r.v.length === 1) { showStops(r, r.v[0]); return; }
+        stack.push({ view: 'home', q: elInput.value });
+        view = 'modal'; elInput.blur();
+        elMTitle.innerText = 'קו ' + r.n + ' (' + r.a + ')';
+        elMList.innerHTML = ''; modalData = [];
+        r.v.forEach((v, i) => {
+            modalData.push({ r: r, v: v });
+            const el = document.createElement('div');
+            el.className = 'item';
+            el.id = 'm-item-' + i;
+            el.onclick = () => { sel = i; renderSelection(); triggerSelect(); };
+            el.innerHTML = `<div class="badge bus" style="font-size:12px">➔</div>
+                            <div class="info"><div class="title">${v.d}</div>
+                            <span class="sub">${v.s.length} תחנות</span></div>`;
+            elMList.appendChild(el);
+        });
+        elModal.classList.add('show'); sel = 0; renderSelection();
+    }
+
+    function showStops(r, v) {
+        if (view === 'modal') elModal.classList.remove('show');
+        else stack.push({ view: 'home', q: elInput.value });
+        view = 'stops'; elInput.value = 'קו ' + r.n + ': ' + v.d;
+        elList.innerHTML = ''; listData = [];
+        v.s.forEach((sid, i) => {
+            const s = db.stops[sid];
+            if (s) {
+                listData.push({ type: 'stop_in_route', data: s, id: sid });
+                const el = document.createElement('div');
+                el.className = 'item';
+                el.id = 'item-' + i;
+                el.onclick = () => { sel = i; renderSelection(); triggerSelect(); };
+                el.innerHTML = `<div class="badge stop" style="font-size:12px">${i+1}</div>
+                                <div class="info"><div class="title">${s.n}</div>
+                                <span class="sub">${s.c}</span></div>`;
+                elList.appendChild(el);
+            }
+        });
+        sel = 0; renderSelection(); elList.scrollTop = 0;
+    }
+
+    function openStop(s, sid) {
+        stack.push({ view: view, q: elInput.value, lastSel: sel });
+        view = 'stop_lines'; elInput.value = s.n;
+        elList.innerHTML = ''; listData = [];
+        elList.innerHTML = '<div style="padding:8px;background:#eee;font-weight:bold;font-size:14px">קווים העוברים בתחנה:</div>';
+        s.l.forEach((lineStr, i) => {
+            const parts = lineStr.split('|');
+            const num = parts[0];
+            const agency = parts.length > 1 ? parts[1] : '';
+            const route = db.routes.find(r => r.n === num && r.a === agency);
+            if (route) {
+                listData.push({ type: 'route', data: route });
+                const el = document.createElement('div');
+                el.className = 'item';
+                el.id = 'item-' + i;
+                el.onclick = () => { sel = i; renderSelection(); triggerSelect(); };
+                el.innerHTML = `<div class="badge bus">${num}</div>
+                                <div class="info"><div class="title">קו ${num}</div>
+                                <span class="sub">${agency}</span></div>`;
+                elList.appendChild(el);
+            }
+        });
+        sel = 0; renderSelection(); elList.scrollTop = 0;
+    }
+
+    function goBack() {
+        if (stack.length === 0) {
+            if (view !== 'home') { elInput.value = ''; renderHome(''); elInput.focus(); }
+            return;
+        }
+        const prev = stack.pop();
+        if (prev.view === 'home') {
+            elModal.classList.remove('show');
+            elInput.value = prev.q || ''; renderHome(prev.q || '');
+            if (prev.lastSel) sel = prev.lastSel; elInput.focus();
+        } else {
+            elInput.value = ''; renderHome(''); elInput.focus();
+        }
+    }
+</script>
+</body>
+</html>
+    
